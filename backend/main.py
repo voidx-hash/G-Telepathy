@@ -1,10 +1,16 @@
 """
 G Telepathy — FastAPI Application Entry Point
 """
-from fastapi import FastAPI
+import logging
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
 import socketio
 from config import settings
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # ── Socket.io ─────────────────────────────────────────────────────────────────
 sio = socketio.AsyncServer(
@@ -19,15 +25,49 @@ app = FastAPI(
     title="G Telepathy API",
     description="Backend for the G Telepathy secure communication platform",
     version="1.0.0",
+    # Disable OpenAPI docs in production to avoid leaking API structure
+    docs_url="/docs" if settings.environment != "production" else None,
+    redoc_url="/redoc" if settings.environment != "production" else None,
 )
 
+# ── CORS ──────────────────────────────────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],  # explicit, not "*"
+    allow_headers=["Authorization", "Content-Type", "Accept"],  # explicit, not "*"
 )
+
+# ── Security Headers Middleware ────────────────────────────────────────────────
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    # Remove server info leakage
+    response.headers.pop("server", None)
+    return response
+
+# ── Global Error Handlers (never leak stack traces) ───────────────────────────
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request: Request, exc: RequestValidationError):
+    logger.warning(f"Validation error on {request.url}: {exc.errors()}")
+    return JSONResponse(
+        status_code=422,
+        content={"detail": "Invalid request data", "errors": exc.errors()},
+    )
+
+@app.exception_handler(Exception)
+async def generic_error_handler(request: Request, exc: Exception):
+    logger.error(f"Unhandled error on {request.url}: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "An internal server error occurred."},
+    )
 
 # ── Routers ────────────────────────────────────────────────────────────────────
 from routers import auth, chat, calls, rooms, translate
@@ -50,7 +90,12 @@ socket_app = socketio.ASGIApp(sio, other_asgi_app=app)
 
 @app.get("/", tags=["Health"])
 async def root():
-    return {"status": "ok", "service": "G Telepathy API", "version": "1.0.0"}
+    return {
+        "status": "ok",
+        "service": "G Telepathy API",
+        "version": "1.0.0",
+        "phase": "beta",
+    }
 
 
 @app.get("/health", tags=["Health"])

@@ -1,0 +1,10 @@
+# .graphifyignore
+graphify/
+node_modules/
+dist/
+.git/
+graphify-out/
+docs/translations/
+tests/
+fixtures/
+worked/
