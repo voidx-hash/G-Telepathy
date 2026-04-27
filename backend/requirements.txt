@@ -9,8 +9,7 @@ python-multipart==0.0.9
 python-socketio==5.11.2
 websockets==12.0
 
-# Database / Auth
-supabase==2.4.3
+# Auth (self-managed JWT + bcrypt — no Supabase needed)
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 
@@ -24,11 +23,11 @@ elevenlabs==1.2.1
 # Encryption
 pynacl==1.5.0
 
-# HTTP Client
+# HTTP Client (used for D1 HTTP API + Google APIs)
 httpx==0.27.0
 aiohttp==3.9.5
 
-# Environment
+# Environment / Config
 python-dotenv==1.0.1
 pydantic-settings==2.2.1
 

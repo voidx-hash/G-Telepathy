@@ -1,19 +1,32 @@
 """
-G Telepathy — Auth Router
-Uses Supabase Auth. No passwords are stored in our DB.
+G Telepathy — Auth Router (Self-managed JWT + Cloudflare D1)
+
+No Supabase. Passwords are hashed with bcrypt (passlib).
+JWT tokens are signed with our own secret (python-jose).
+
+Security notes:
+- Passwords are never stored in plaintext — bcrypt with 12 rounds
+- Generic error messages on login to prevent email enumeration
+- Tokens expire in JWT_ACCESS_TOKEN_EXPIRE_MINUTES (default 60 min)
+- get_current_user validates signature + expiry on every protected request
 """
 import logging
+import uuid
+from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, HTTPException, Depends, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr, field_validator
-import httpx
+from jose import JWTError, jwt
+from passlib.context import CryptContext
 from config import settings
+from services.d1 import query, execute, D1Error, D1NotConfiguredError
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 bearer = HTTPBearer()
 
-SUPABASE_AUTH_URL = f"{settings.supabase_url}/auth/v1"
+# bcrypt password hashing — 12 rounds is a good production default
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 # ── Schemas ────────────────────────────────────────────────────────────────────
@@ -56,38 +69,51 @@ class AuthError(HTTPException):
         )
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
-def _supabase_headers() -> dict:
-    """Build Supabase REST API headers (service role never exposed to clients)."""
-    return {
-        "apikey": settings.supabase_anon_key,
-        "Content-Type": "application/json",
+# ── JWT Helpers ────────────────────────────────────────────────────────────────
+def _create_access_token(user_id: str, email: str, display_name: str) -> str:
+    expire = datetime.now(timezone.utc) + timedelta(
+        minutes=settings.jwt_access_token_expire_minutes
+    )
+    payload = {
+        "sub": user_id,           # subject = user id
+        "email": email,
+        "display_name": display_name,
+        "exp": expire,
+        "iat": datetime.now(timezone.utc),
     }
+    return jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
 
 
-async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(bearer)) -> dict:
-    """Validate the Bearer token with Supabase and return the user payload."""
-    if not settings.supabase_url or not settings.supabase_anon_key:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Authentication service is not configured.",
-        )
-    token = credentials.credentials
+def _decode_token(token: str) -> dict:
     try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
-            resp = await client.get(
-                f"{SUPABASE_AUTH_URL}/user",
-                headers={**_supabase_headers(), "Authorization": f"Bearer {token}"},
-            )
-        if resp.status_code == 401:
-            raise AuthError("Invalid or expired token.")
-        resp.raise_for_status()
-        return resp.json()
-    except httpx.RequestError:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Could not reach the authentication service.",
+        payload = jwt.decode(
+            token,
+            settings.jwt_secret_key,
+            algorithms=[settings.jwt_algorithm],
         )
+        return payload
+    except JWTError as e:
+        raise AuthError(f"Invalid or expired token: {e}")
+
+
+# ── Auth Dependency (used by all protected routes) ────────────────────────────
+async def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(bearer),
+) -> dict:
+    """
+    Decode and validate the Bearer JWT. Returns the user payload dict.
+    The payload includes: id, email, display_name
+    """
+    payload = _decode_token(credentials.credentials)
+    user_id = payload.get("sub")
+    if not user_id:
+        raise AuthError("Token is missing subject claim.")
+    # Return a dict compatible with the rest of the codebase
+    return {
+        "id": user_id,
+        "email": payload.get("email"),
+        "user_metadata": {"display_name": payload.get("display_name")},
+    }
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
@@ -98,119 +124,150 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(b
 )
 async def register(body: RegisterRequest):
     """
-    Creates a new account via Supabase Auth.
-    Returns access + refresh tokens on success.
-    Requires Supabase to be configured.
+    Creates a new account. Stores hashed password in D1.
+    Returns a JWT access token on success.
     """
-    if not settings.supabase_url or not settings.supabase_anon_key:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Authentication service is not configured. Set SUPABASE_URL and SUPABASE_ANON_KEY.",
-        )
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(
-                f"{SUPABASE_AUTH_URL}/signup",
-                headers=_supabase_headers(),
-                json={
-                    "email": body.email,
-                    "password": body.password,
-                    "data": {"display_name": body.display_name},
-                },
+        # Check if email already exists
+        existing = await query(
+            "SELECT id FROM users WHERE email = ?",
+            [body.email.lower()],
+        )
+        if existing:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="An account with this email already exists.",
             )
-        if resp.status_code == 400:
-            detail = resp.json().get("msg", "Registration failed.")
-            # Normalise Supabase error messages — don't expose internal details
-            if "already registered" in detail.lower():
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail="An account with this email already exists.",
-                )
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid registration data.")
-        resp.raise_for_status()
-        data = resp.json()
+
+        user_id = str(uuid.uuid4())
+        password_hash = pwd_context.hash(body.password)
+        now = datetime.now(timezone.utc).isoformat()
+
+        await execute(
+            """
+            INSERT INTO users (id, email, password_hash, display_name, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [user_id, body.email.lower(), password_hash, body.display_name, now, now],
+        )
+
+        access_token = _create_access_token(user_id, body.email.lower(), body.display_name)
         return {
-            "access_token": data.get("access_token"),
-            "refresh_token": data.get("refresh_token"),
+            "access_token": access_token,
             "token_type": "bearer",
+            "expires_in": settings.jwt_access_token_expire_minutes * 60,
             "user": {
-                "id": data.get("user", {}).get("id"),
-                "email": data.get("user", {}).get("email"),
+                "id": user_id,
+                "email": body.email.lower(),
                 "display_name": body.display_name,
             },
         }
+
     except HTTPException:
         raise
-    except httpx.RequestError:
+    except D1NotConfiguredError:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Could not reach the authentication service.",
+            detail="Database service is not configured. Set CLOUDFLARE_* environment variables.",
+        )
+    except D1Error as e:
+        logger.error("D1 error during registration: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database service is unavailable. Please try again later.",
         )
 
 
-@router.post("/login", summary="Sign in with email and password")
+@router.post("/login", summary="Sign in")
 async def login(body: LoginRequest):
     """
-    Authenticates a user with Supabase Auth.
-    Returns access + refresh tokens.
-    Uses a generic error message to prevent user enumeration.
+    Verifies email + password. Returns a JWT on success.
+    Deliberately uses a generic error to prevent email enumeration.
     """
-    if not settings.supabase_url or not settings.supabase_anon_key:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Authentication service is not configured.",
-        )
+    _GENERIC_AUTH_ERROR = "Invalid email or password."
+
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(
-                f"{SUPABASE_AUTH_URL}/token?grant_type=password",
-                headers=_supabase_headers(),
-                json={"email": body.email, "password": body.password},
-            )
-        if resp.status_code in (400, 401, 422):
-            # Generic message to prevent email enumeration attacks
-            raise AuthError("Invalid email or password.")
-        resp.raise_for_status()
-        data = resp.json()
+        rows = await query(
+            "SELECT id, email, password_hash, display_name FROM users WHERE email = ?",
+            [body.email.lower()],
+        )
+
+        if not rows:
+            # Still verify a dummy hash to prevent timing attacks
+            pwd_context.dummy_verify()
+            raise AuthError(_GENERIC_AUTH_ERROR)
+
+        user = rows[0]
+        if not pwd_context.verify(body.password, user["password_hash"]):
+            raise AuthError(_GENERIC_AUTH_ERROR)
+
+        # Update last_seen
+        await execute(
+            "UPDATE users SET last_seen = ? WHERE id = ?",
+            [datetime.now(timezone.utc).isoformat(), user["id"]],
+        )
+
+        access_token = _create_access_token(user["id"], user["email"], user["display_name"])
         return {
-            "access_token": data.get("access_token"),
-            "refresh_token": data.get("refresh_token"),
+            "access_token": access_token,
             "token_type": "bearer",
-            "expires_in": data.get("expires_in"),
+            "expires_in": settings.jwt_access_token_expire_minutes * 60,
         }
+
     except HTTPException:
         raise
-    except httpx.RequestError:
+    except D1NotConfiguredError:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Could not reach the authentication service.",
+            detail="Database service is not configured.",
+        )
+    except D1Error as e:
+        logger.error("D1 error during login: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database service is unavailable.",
         )
 
 
-@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT, summary="Sign out")
-async def logout(user: dict = Depends(get_current_user), credentials: HTTPAuthorizationCredentials = Depends(bearer)):
-    """Invalidates the user's session token in Supabase."""
-    if not settings.supabase_url:
-        return
-    try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
-            await client.post(
-                f"{SUPABASE_AUTH_URL}/logout",
-                headers={
-                    **_supabase_headers(),
-                    "Authorization": f"Bearer {credentials.credentials}",
-                },
-            )
-    except Exception:
-        logger.warning("Logout request to Supabase failed, continuing silently.")
+@router.post(
+    "/logout",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Sign out",
+)
+async def logout(_user: dict = Depends(get_current_user)):
+    """
+    JWT is stateless — client must discard the token.
+    For true revocation, add token_id to a D1 blocklist (future work).
+    """
+    return
 
 
 @router.get("/me", summary="Get current user profile")
 async def get_me(user: dict = Depends(get_current_user)):
-    """Returns the authenticated user's profile. Requires a valid Bearer token."""
-    return {
-        "id": user.get("id"),
-        "email": user.get("email"),
-        "display_name": user.get("user_metadata", {}).get("display_name"),
-        "created_at": user.get("created_at"),
-    }
+    """Returns the authenticated user's profile from the JWT payload."""
+    try:
+        rows = await query(
+            "SELECT id, email, display_name, avatar_url, bio, preferred_language, created_at FROM users WHERE id = ?",
+            [user["id"]],
+        )
+        if rows:
+            return rows[0]
+        # Fallback to JWT payload if D1 is slow
+        return {
+            "id": user["id"],
+            "email": user["email"],
+            "display_name": user.get("user_metadata", {}).get("display_name"),
+        }
+    except D1NotConfiguredError:
+        # Still works from JWT payload even without DB
+        return {
+            "id": user["id"],
+            "email": user["email"],
+            "display_name": user.get("user_metadata", {}).get("display_name"),
+        }
+    except D1Error:
+        return {
+            "id": user["id"],
+            "email": user["email"],
+            "display_name": user.get("user_metadata", {}).get("display_name"),
+        }

@@ -10,25 +10,28 @@ from typing import List
 
 
 class Settings(BaseSettings):
-    # ── Supabase ────────────────────────────────────────────────────────────
-    supabase_url: str = ""
-    supabase_anon_key: str = ""
-    supabase_service_role_key: str = ""
+    # ── Cloudflare D1 ────────────────────────────────────────────────────────
+    # Get these from Cloudflare Dashboard → Workers & Pages → D1
+    cloudflare_account_id: str = ""
+    cloudflare_d1_database_id: str = ""
+    # API Token: Cloudflare Dashboard → My Profile → API Tokens
+    # Needs permission: "D1 Edit" on the target account
+    cloudflare_api_token: str = ""
 
-    # ── Google Cloud ─────────────────────────────────────────────────────────
+    # ── Google Cloud ──────────────────────────────────────────────────────────
     google_cloud_project_id: str = ""
     google_translate_api_key: str = ""
     google_speech_api_key: str = ""
 
-    # ── ElevenLabs (Voice Cloning) ───────────────────────────────────────────
+    # ── ElevenLabs (Voice Cloning) ────────────────────────────────────────────
     elevenlabs_api_key: str = ""
 
-    # ── JWT ──────────────────────────────────────────────────────────────────
+    # ── JWT (self-managed, no Supabase) ────────────────────────────────────────
     jwt_secret_key: str = ""
     jwt_algorithm: str = "HS256"
-    jwt_access_token_expire_minutes: int = 60  # 1 hour, not 24h
+    jwt_access_token_expire_minutes: int = 60  # 1 hour
 
-    # ── App ──────────────────────────────────────────────────────────────────
+    # ── App ────────────────────────────────────────────────────────────────────
     backend_port: int = 8000
     cors_origins: List[str] = ["http://localhost:3000"]
     environment: str = "development"
@@ -46,7 +49,6 @@ class Settings(BaseSettings):
     def validate_cors(cls, v) -> List[str]:
         if isinstance(v, str):
             v = [o.strip() for o in v.split(",")]
-        # In production, never allow wildcard origins
         for origin in v:
             if origin == "*":
                 raise ValueError("Wildcard CORS origin '*' is not allowed for security reasons.")
@@ -54,12 +56,11 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_secrets(self) -> "Settings":
-        # In production, all secrets must be set
         if self.environment == "production":
             required = {
-                "supabase_url": self.supabase_url,
-                "supabase_anon_key": self.supabase_anon_key,
-                "supabase_service_role_key": self.supabase_service_role_key,
+                "cloudflare_account_id": self.cloudflare_account_id,
+                "cloudflare_d1_database_id": self.cloudflare_d1_database_id,
+                "cloudflare_api_token": self.cloudflare_api_token,
                 "jwt_secret_key": self.jwt_secret_key,
             }
             missing = [k for k, v in required.items() if not v]
@@ -68,7 +69,6 @@ class Settings(BaseSettings):
 
         # Always require a non-default JWT secret
         if not self.jwt_secret_key:
-            # In dev, auto-generate a temporary secret and warn
             self.jwt_secret_key = secrets.token_hex(32)
             print(
                 "[WARNING] jwt_secret_key is not set. A random temporary key has been generated. "
