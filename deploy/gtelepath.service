@@ -1,0 +1,47 @@
+[Unit]
+Description=G Telepathy FastAPI Backend
+Documentation=https://github.com/voidx-hash/G-Telepathy
+After=network.target
+Wants=network-online.target
+
+[Service]
+# Run as a dedicated non-root user (created in startup.sh)
+User=gtelepath
+Group=gtelepath
+
+WorkingDirectory=/opt/gtelepath/backend
+
+# Load environment variables from the .env file
+EnvironmentFile=/opt/gtelepath/.env
+
+# Launch uvicorn with the Socket.io ASGI app
+ExecStart=/opt/gtelepath/venv/bin/python -m uvicorn main:socket_app \
+    --host 127.0.0.1 \
+    --port 8000 \
+    --workers 1 \
+    --loop asyncio \
+    --log-level info \
+    --access-log \
+    --proxy-headers \
+    --forwarded-allow-ips 127.0.0.1
+
+# Restart on failure (not on intentional stop)
+Restart=on-failure
+RestartSec=5s
+StartLimitInterval=60s
+StartLimitBurst=3
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/gtelepath/logs
+ProtectHome=true
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=gtelepath
+
+[Install]
+WantedBy=multi-user.target
