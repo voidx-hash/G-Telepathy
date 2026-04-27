@@ -4,7 +4,7 @@ Raises at startup if required secrets are missing.
 """
 import os
 import secrets
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import field_validator, model_validator
 from typing import List
 
@@ -82,9 +82,7 @@ class Settings(BaseSettings):
             )
         return self
 
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
 
 settings = Settings()

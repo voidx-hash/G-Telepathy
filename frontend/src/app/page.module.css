@@ -61,6 +61,45 @@
 }
 .navLink:hover { color: var(--color-text); }
 
+/* Beta Testing Banner */
+.betaBanner {
+  position: relative;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px 24px;
+  background: linear-gradient(135deg, rgba(124,58,237,0.18) 0%, rgba(6,182,212,0.12) 100%);
+  border-bottom: 1px solid rgba(124,58,237,0.3);
+  font-size: 0.88rem;
+  color: var(--color-text-muted);
+  text-align: center;
+  animation: fadeIn 0.5s ease;
+}
+@keyframes fadeIn { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: none; } }
+.betaDot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #22d3ee;
+  box-shadow: 0 0 8px #22d3ee;
+  animation: blink 1.6s ease-in-out infinite;
+  flex-shrink: 0;
+}
+@keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+.betaBanner strong { color: var(--color-text); }
+.betaLink {
+  color: var(--color-primary-dim);
+  text-decoration: none;
+  font-weight: 600;
+  white-space: nowrap;
+  transition: color var(--transition);
+}
+.betaLink:hover { color: var(--color-primary); }
+
 /* Hero */
 .hero {
   position: relative;

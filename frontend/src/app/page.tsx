@@ -73,11 +73,21 @@ export default function LandingPage() {
         </div>
       </nav>
 
+      {/* Beta Testing Banner */}
+      <div className={styles.betaBanner}>
+        <span className={styles.betaDot} aria-hidden />
+        <strong>🚀 Now Open for Beta Testing</strong>
+        &nbsp;— G Telepathy is live and accepting early users. Features may evolve. Your feedback shapes the platform.
+        <a href="https://github.com/voidx-hash/G-Telepathy/issues" target="_blank" rel="noopener noreferrer" className={styles.betaLink}>
+          Report an Issue →
+        </a>
+      </div>
+
       {/* Hero */}
       <section className={styles.hero}>
         <div className={`badge badge-cyan ${styles.heroBadge}`}>
           <Shield size={12} />
-          AES-256 End-to-End Encrypted
+          Beta · AES-256 End-to-End Encrypted
         </div>
         <h1 className={styles.heroTitle}>
           Communicate<br />

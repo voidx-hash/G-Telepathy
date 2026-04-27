@@ -48,17 +48,25 @@ async def add_security_headers(request: Request, call_next):
     response.headers["X-XSS-Protection"] = "1; mode=block"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
-    # Remove server info leakage
-    response.headers.pop("server", None)
+    # Remove server info leakage — MutableHeaders has no .pop(), use del
+    if "server" in response.headers:
+        del response.headers["server"]
     return response
 
 # ── Global Error Handlers (never leak stack traces) ───────────────────────────
 @app.exception_handler(RequestValidationError)
 async def validation_error_handler(request: Request, exc: RequestValidationError):
-    logger.warning(f"Validation error on {request.url}: {exc.errors()}")
+    # Sanitize errors: strip 'url' and non-serializable 'ctx' values
+    def _clean_error(e: dict) -> dict:
+        clean = {k: v for k, v in e.items() if k not in ("url",)}
+        if "ctx" in clean:
+            clean["ctx"] = {k: str(v) for k, v in clean["ctx"].items()}
+        return clean
+    errors = [_clean_error(e) for e in exc.errors()]
+    logger.warning(f"Validation error on {request.url}: {errors}")
     return JSONResponse(
         status_code=422,
-        content={"detail": "Invalid request data", "errors": exc.errors()},
+        content={"detail": "Invalid request data", "errors": errors},
     )
 
 @app.exception_handler(Exception)
