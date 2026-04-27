@@ -12,17 +12,19 @@ build/
 venv/
 env/
 
-# Environment
+# Environment — NEVER commit real secrets
 .env
 *.env.local
 
-# Node.js
+# Node.js / Next.js
 node_modules/
 .next/
 out/
 .vercel/
 npm-debug.log*
 yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
 
 # IDE
 .vscode/
@@ -32,7 +34,7 @@ yarn-debug.log*
 .DS_Store
 Thumbs.db
 
-# Testing
+# Testing / Coverage
 .pytest_cache/
 .coverage
 htmlcov/
@@ -42,16 +44,21 @@ coverage/
 *.log
 logs/
 
-# Keys & Secrets
+# Keys & Secrets — NEVER commit these
 *.pem
 *.key
 service-account*.json
 credentials*.json
 
-# GCP / Deploy
+# GCP / Infra
 *.tfstate
 *.tfstate.backup
 .terraform/
 
-# Graphify output (auto-generated, not needed in repo)
+# Graphify (knowledge graph tool, dev-only)
+graphify/
 graphify-out/
+.graphifyignore
+
+# Antigravity agent scratch files
+.agents/
